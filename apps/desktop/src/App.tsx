@@ -1,10 +1,43 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Logo } from './components/logo';
-import { PanelLeftClose, Inbox, SquarePen } from 'lucide-react';
+import { DesktopSidebar } from './components/sidebar';
+import {
+  PanelLeft,
+  Loader2,
+  ExternalLink,
+  Sparkles,
+  Plus,
+  AlertCircle,
+  FileText,
+  Home,
+} from 'lucide-react';
+import { PageView } from '@repo/ui/components/page-view';
+import { getPageIcon } from '@repo/ui/components/page-tree';
+import {
+  PageItem,
+  fetchPagesFromApi,
+  createPageInApi,
+  deletePageFromApi,
+  findPageById,
+  insertPageInTree,
+  updatePageInTree,
+  deletePageFromTree,
+} from '@repo/ui/lib/page-api';
 
 export function App() {
   const [page, setPage] = useState<'login' | 'dashboard'>('login');
-  const [email, setEmail] = useState('');
+  const [user, setUser] = useState<DesktopAuthUser | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [activeItem, setActiveItem] = useState<string>('home');
+
+  // Real pages loaded from PostgreSQL API (Zero dummy data)
+  const [pages, setPages] = useState<PageItem[]>([]);
+  const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
+  const [isLoadingPages, setIsLoadingPages] = useState<boolean>(true);
+
   const [isDark, setIsDark] = useState(() => {
     if (typeof window !== 'undefined' && window.matchMedia) {
       return window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -12,6 +45,156 @@ export function App() {
     return true;
   });
 
+  // Restore saved session on app launch
+  useEffect(() => {
+    try {
+      const savedAuth = localStorage.getItem('kivo_desktop_auth');
+      if (savedAuth) {
+        const parsed = JSON.parse(savedAuth);
+        if (parsed.token && parsed.user) {
+          setUser(parsed.user);
+          setToken(parsed.token);
+          setPage('dashboard');
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to parse saved auth from localStorage:', e);
+    }
+  }, []);
+
+  // Listen for auth:success event from main process (via loopback server or kivo:// deep link)
+  useEffect(() => {
+    const handleAuthSuccess = (data: { token: string; user: DesktopAuthUser }) => {
+      if (data && data.token) {
+        localStorage.setItem('kivo_desktop_auth', JSON.stringify(data));
+        setUser(data.user);
+        setToken(data.token);
+        setIsAuthenticating(false);
+        setAuthError(null);
+        setPage('dashboard');
+      }
+    };
+
+    let unsubscribe: (() => void) | undefined;
+    if (window.electronAPI?.onAuthSuccess) {
+      unsubscribe = window.electronAPI.onAuthSuccess(handleAuthSuccess);
+    }
+
+    const ipcHandler = (_event: any, data: { token: string; user: DesktopAuthUser }) => {
+      handleAuthSuccess(data);
+    };
+    if (window.ipcRenderer?.on) {
+      window.ipcRenderer.on('auth:success', ipcHandler);
+    }
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+      if (window.ipcRenderer?.off) {
+        window.ipcRenderer.off('auth:success', ipcHandler);
+      }
+    };
+  }, []);
+
+  // Fetch real cloud pages on mount or auth change
+  const loadPages = useCallback(async () => {
+    setIsLoadingPages(true);
+    try {
+      const data = await fetchPagesFromApi(token);
+      setPages(data);
+      if (data.length > 0) {
+        setSelectedPageId((prev) => prev || data[0].id);
+      }
+    } catch (err) {
+      console.error('[Desktop] Failed to fetch pages from cloud:', err);
+    } finally {
+      setIsLoadingPages(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    if (page === 'dashboard') {
+      loadPages();
+    }
+  }, [page, loadPages]);
+
+  // Create page in cloud database
+  const handleCreatePage = useCallback(
+    async (parentId?: string | null) => {
+      try {
+        const created = await createPageInApi(
+          {
+            title: 'Untitled',
+            parentId: parentId || null,
+            icon: parentId ? 'file' : 'home',
+            quote: 'If you can dream it, you can do it.',
+            content: '',
+          },
+          token
+        );
+        if (created) {
+          setPages((prev) => insertPageInTree(prev, created, parentId));
+          setSelectedPageId(created.id);
+          setActiveItem(created.id);
+        }
+      } catch (err) {
+        console.error('[Desktop] Failed to create page:', err);
+      }
+    },
+    [token]
+  );
+
+  // Delete page from cloud database
+  const handleDeletePage = useCallback(
+    async (id: string) => {
+      try {
+        const ok = await deletePageFromApi(id, token);
+        if (ok) {
+          setPages((prev) => {
+            const next = deletePageFromTree(prev, id);
+            if (selectedPageId === id) {
+              const fallback = next.length > 0 ? next[0].id : null;
+              setSelectedPageId(fallback);
+              setActiveItem(fallback || 'home');
+            }
+            return next;
+          });
+        }
+      } catch (err) {
+        console.error('[Desktop] Failed to delete page:', err);
+      }
+    },
+    [token, selectedPageId]
+  );
+
+  // Update page in local tree when changed in PageView
+  const handlePageUpdate = useCallback((updatedPage: PageItem) => {
+    setPages((prev) => updatePageInTree(prev, updatedPage.id, updatedPage));
+  }, []);
+
+  const handleSelectPage = useCallback((pageItem: PageItem) => {
+    setSelectedPageId(pageItem.id);
+    setActiveItem(pageItem.id);
+  }, []);
+
+  const handleSelectItem = useCallback(
+    (item: string) => {
+      if (item === 'chat') {
+        setActiveItem('chat');
+      } else {
+        if (selectedPageId) {
+          setActiveItem(selectedPageId);
+        } else if (pages.length > 0 && pages[0]) {
+          setSelectedPageId(pages[0].id);
+          setActiveItem(pages[0].id);
+        } else {
+          setActiveItem('home');
+        }
+      }
+    },
+    [pages, selectedPageId]
+  );
+
+  // Handle system theme updates
   useEffect(() => {
     if (typeof window === 'undefined' || !window.matchMedia) return;
 
@@ -31,139 +214,212 @@ export function App() {
     return () => mediaQuery.removeEventListener('change', listener);
   }, []);
 
-  const handleContinue = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (email) {
-      console.log('Continue with email:', email);
+  // Initiate authentication via web browser
+  const handleGoogleSignIn = useCallback(async () => {
+    setIsAuthenticating(true);
+    setAuthError(null);
+
+    try {
+      if (window.electronAPI?.startGoogleAuth) {
+        const result = await window.electronAPI.startGoogleAuth();
+        if (!result.started && result.error) {
+          setAuthError(result.error);
+          setIsAuthenticating(false);
+        }
+      } else if (window.ipcRenderer?.invoke) {
+        const result = await window.ipcRenderer.invoke('auth:start-google');
+        if (result && !result.started && result.error) {
+          setAuthError(result.error);
+          setIsAuthenticating(false);
+        }
+      } else {
+        // Fallback for browser preview mode (when running Vite without Electron)
+        window.open('http://localhost:3000/login?source=desktop', '_blank');
+      }
+    } catch (err: any) {
+      console.error('Error initiating Google sign-in:', err);
+      setAuthError(err.message || 'Could not launch Google authentication in browser.');
+      setIsAuthenticating(false);
     }
-  };
+  }, []);
+
+  // Cancel pending authentication
+  const handleCancelAuth = useCallback(async () => {
+    try {
+      if (window.electronAPI?.cancelAuth) {
+        await window.electronAPI.cancelAuth();
+      } else if (window.ipcRenderer?.invoke) {
+        await window.ipcRenderer.invoke('auth:cancel');
+      }
+    } catch {
+      // Ignore cancel errors
+    } finally {
+      setIsAuthenticating(false);
+    }
+  }, []);
+
+  // Sign out user and return to login screen
+  const handleSignOut = useCallback(() => {
+    localStorage.removeItem('kivo_desktop_auth');
+    setUser(null);
+    setToken(null);
+    setPages([]);
+    setSelectedPageId(null);
+    setPage('login');
+  }, []);
+
+  const toggleTheme = useCallback(() => {
+    setIsDark((prev) => {
+      const next = !prev;
+      document.documentElement.classList.toggle('dark', next);
+      return next;
+    });
+  }, []);
+
+  const selectedPage = selectedPageId ? findPageById(pages, selectedPageId) : null;
 
   return (
     <div
       className={`min-h-screen selection:bg-blue-500/30 transition-colors duration-200 ${
         isDark
-          ? 'bg-[#111111] text-[#ededed] selection:text-white'
-          : 'bg-[#f8f9fa] text-[#1a1a1a] selection:text-blue-900'
+          ? 'bg-[#191919] text-[#ededed] selection:text-white'
+          : 'bg-[#ffffff] text-[#1a1a1a] selection:text-blue-900'
       }`}
     >
       {page === 'dashboard' ? (
-        /* Workspace Screen with Full-Height Left Sidebar & Right Main Content */
+        /* Workspace Screen with Left Sidebar & Right Main Content */
         <div className="h-screen w-screen flex flex-row overflow-hidden">
-          {/* Full-Height Left Sidebar */}
-          <aside
-            className={`w-64 h-screen flex flex-col justify-between p-4 border-r select-none transition-colors ${
-              isDark
-                ? 'bg-[#141414] border-white/[0.08] text-[#ededed]'
-                : 'bg-[#f0f2f5] border-gray-200 text-gray-800'
-            }`}
-          >
-            <div className="flex flex-col">
-              {/* Top Sidebar Header aligned with window titlebar */}
-              <div
-                className="h-9 -mx-4 -mt-4 px-3 flex items-center justify-between border-b flex-shrink-0 select-none transition-colors"
-                style={
-                  {
-                    WebkitAppRegion: 'drag',
-                    borderColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)',
-                  } as React.CSSProperties
-                }
-              >
-                {/* Left: Logo & Toggle Sidebar */}
-                <div
-                  className="flex items-center gap-1.5"
-                  style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-                >
-                  <button
-                    type="button"
-                    className={`p-1 rounded-md transition-colors cursor-pointer ${
-                      isDark
-                        ? 'hover:bg-white/[0.08] text-white'
-                        : 'hover:bg-gray-200 text-gray-800'
-                    }`}
-                    title="Kivo"
-                  >
-                    <Logo size={18} isDark={isDark} />
-                  </button>
-                  <button
-                    type="button"
-                    className={`p-1 rounded-md transition-colors cursor-pointer ${
-                      isDark
-                        ? 'hover:bg-white/[0.08] text-[#9b9b9b] hover:text-white'
-                        : 'hover:bg-gray-200 text-gray-600 hover:text-gray-900'
-                    }`}
-                    title="Toggle Sidebar"
-                  >
-                    <PanelLeftClose className="size-4" />
-                  </button>
-                </div>
-
-                {/* Right: Inbox & New Note */}
-                <div
-                  className="flex items-center gap-1"
-                  style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-                >
-                  <button
-                    type="button"
-                    className={`p-1 rounded-md transition-colors cursor-pointer ${
-                      isDark
-                        ? 'hover:bg-white/[0.08] text-[#9b9b9b] hover:text-white'
-                        : 'hover:bg-gray-200 text-gray-600 hover:text-gray-900'
-                    }`}
-                    title="Inbox"
-                  >
-                    <Inbox className="size-4" />
-                  </button>
-                  <button
-                    type="button"
-                    className={`p-1 rounded-md transition-colors cursor-pointer ${
-                      isDark
-                        ? 'hover:bg-white/[0.08] text-[#9b9b9b] hover:text-white'
-                        : 'hover:bg-gray-200 text-gray-600 hover:text-gray-900'
-                    }`}
-                    title="New Note"
-                  >
-                    <SquarePen className="size-4" />
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Bottom Actions */}
-            <div className="pt-3 border-t border-inherit">
-              <button
-                type="button"
-                onClick={() => setPage('login')}
-                className={`w-full flex items-center gap-2 px-3 py-2 text-xs font-medium rounded-lg transition-all cursor-pointer ${
-                  isDark
-                    ? 'hover:bg-white/[0.06] text-[#9b9b9b] hover:text-white'
-                    : 'hover:bg-gray-200 text-gray-600 hover:text-gray-900'
-                }`}
-              >
-                <span>← Back to Login</span>
-              </button>
-            </div>
-          </aside>
+          {/* Notion-style Left Sidebar */}
+          {isSidebarOpen && (
+            <DesktopSidebar
+              user={user}
+              isDark={isDark}
+              onToggleSidebar={() => setIsSidebarOpen(false)}
+              activeItem={activeItem}
+              onSelectItem={handleSelectItem}
+              onSignOut={handleSignOut}
+              onToggleTheme={toggleTheme}
+              isElectron={true}
+              pages={pages}
+              selectedPageId={selectedPageId}
+              onSelectPage={handleSelectPage}
+              onCreatePage={handleCreatePage}
+              onDeletePage={handleDeletePage}
+            />
+          )}
 
           {/* Right Main Column (Titlebar + Main Content) */}
-          <div className="flex-1 h-screen flex flex-col overflow-hidden">
+          <div className="flex-1 h-screen flex flex-col overflow-hidden relative">
             {/* Native Window Titlebar Drag Region for Main Area */}
             <div
-              className="h-9 w-full flex-shrink-0 select-none"
+              className={`h-10 w-full flex-shrink-0 select-none flex items-center px-4 justify-between border-b ${
+                isDark ? 'border-white/[0.06] bg-[#191919]' : 'border-black/[0.06] bg-[#ffffff]'
+              }`}
               style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
-            />
+            >
+              <div
+                className="flex items-center gap-2"
+                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+              >
+                {!isSidebarOpen && (
+                  <button
+                    type="button"
+                    onClick={() => setIsSidebarOpen(true)}
+                    className={`p-1 rounded-md transition-colors cursor-pointer mr-0.5 ${
+                      isDark
+                        ? 'hover:bg-white/[0.08] text-[#9b9b9b] hover:text-white'
+                        : 'hover:bg-black/[0.06] text-[#6b6966] hover:text-black'
+                    }`}
+                    title="Open sidebar"
+                  >
+                    <PanelLeft className="size-4" />
+                  </button>
+                )}
+                {activeItem === 'chat' ? (
+                  <Sparkles className="size-3.5 text-violet-400 shrink-0" />
+                ) : selectedPage ? (
+                  getPageIcon(selectedPage, 'size-3.5')
+                ) : (
+                  <Home className="size-3.5 text-gray-400 shrink-0" />
+                )}
+                <span className="text-xs font-medium">
+                  {activeItem === 'chat' ? 'Chat' : selectedPage?.title || 'Untitled'}
+                </span>
+              </div>
+
+              {/* Electron native window controls space - Connected badge removed */}
+              <div
+                className="flex items-center gap-2 pr-28"
+                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+              />
+            </div>
 
             {/* Right Main Content Area */}
-            <main className="flex-1 flex items-center justify-center p-8 overflow-auto">
-              <div className="text-center">
-                <h1
-                  className={`text-2xl font-bold tracking-tight ${
-                    isDark ? 'text-white' : 'text-gray-900'
+            <div className="flex-1 min-h-0 overflow-hidden flex flex-col relative">
+              {activeItem === 'chat' ? (
+                /* Chat & AI Assistant View */
+                <div
+                  className={`flex-1 h-full flex flex-col items-center justify-center p-8 text-center select-none ${
+                    isDark ? 'bg-[#191919]' : 'bg-[#ffffff]'
                   }`}
                 >
-                  Main Content
-                </h1>
-              </div>
-            </main>
+                  <div className="max-w-md space-y-4">
+                    <div className="size-14 rounded-2xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center mx-auto text-violet-400">
+                      <Sparkles className="size-7" />
+                    </div>
+                    <h2 className="text-xl font-semibold">Gemini AI Assistant</h2>
+                    <p className="text-xs text-gray-400 leading-relaxed">
+                      Chat, summarize your workspace pages, brainstorm new content, and ask questions about your documents in real-time.
+                    </p>
+                  </div>
+                </div>
+              ) : selectedPage ? (
+                /* Real Page with Tiptap Editor & Cover Banner matching user screenshot */
+                <PageView
+                  page={selectedPage}
+                  onPageUpdate={handlePageUpdate}
+                  token={token}
+                  isDark={isDark}
+                  showHeader={false}
+                />
+              ) : isLoadingPages ? (
+                /* Loading State */
+                <div className="flex-1 h-full flex items-center justify-center">
+                  <Loader2 className="size-6 animate-spin text-[#0085FF]" />
+                </div>
+              ) : (
+                /* Zero Dummy Data - Clean Empty State */
+                <div
+                  className={`flex-1 h-full flex flex-col items-center justify-center p-8 text-center select-none ${
+                    isDark ? 'bg-[#191919]' : 'bg-[#ffffff]'
+                  }`}
+                >
+                  <div className="max-w-md space-y-4">
+                    <div
+                      className={`size-14 rounded-2xl flex items-center justify-center mx-auto ${
+                        isDark ? 'bg-white/5 border border-white/10 text-gray-400' : 'bg-black/5 border border-black/10 text-gray-600'
+                      }`}
+                    >
+                      <FileText className="size-7" />
+                    </div>
+                    <h2 className={`text-xl font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                      No pages yet
+                    </h2>
+                    <p className="text-xs text-gray-400 leading-relaxed">
+                      Your workspace is fresh and clean. Click below to add your first cloud page.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => handleCreatePage(null)}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white text-black font-medium text-xs shadow-md hover:bg-gray-100 transition-colors cursor-pointer"
+                    >
+                      <Plus className="size-4" />
+                      <span>Add a page</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       ) : (
@@ -177,98 +433,115 @@ export function App() {
 
           {/* Login Main Content Area */}
           <main className="flex-1 flex flex-col items-center justify-center px-4 py-12">
-            <div className="w-full max-w-[420px] flex flex-col items-center">
+            <div className="w-full max-w-[380px] flex flex-col items-center text-center animate-in fade-in duration-200">
               {/* Standalone Kivo Logo */}
-              <Logo size={46} isDark={isDark} className="mb-6" />
+              <div className="mb-6 flex items-center justify-center">
+                <Logo size={46} isDark={isDark} />
+              </div>
 
               {/* Heading & Subtitle */}
               <h1
-                className={`text-2xl font-bold tracking-tight text-center mb-1.5 ${
+                className={`text-2xl font-semibold tracking-tight text-center mb-2 ${
                   isDark ? 'text-white' : 'text-[#111827]'
                 }`}
               >
-                Your AI workspace.
+                Sign in to Kivo
               </h1>
               <p
-                className={`text-sm text-center mb-8 font-normal ${
+                className={`text-sm text-center mb-8 font-normal leading-relaxed ${
                   isDark ? 'text-[#9b9b9b]' : 'text-[#6b7280]'
                 }`}
               >
-                Log in to your Kivo account
+                {isAuthenticating
+                  ? 'Complete sign-in in your web browser. Kivo Desktop will automatically resume.'
+                  : 'Continue with Google to access your workspace and documents.'}
               </p>
 
-              {/* Form */}
-              <form onSubmit={handleContinue} className="w-full">
-                <div className="mb-4">
-                  <label
-                    htmlFor="email-input"
-                    className={`block text-xs font-semibold mb-2 uppercase tracking-wider ${
-                      isDark ? 'text-[#8b8b8b]' : 'text-[#6b7280]'
-                    }`}
-                  >
-                    Email
-                  </label>
-                  <input
-                    id="email-input"
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="Enter your email address..."
-                    required
-                    className={`w-full h-11 px-3.5 rounded-lg text-sm transition-all focus:outline-none focus:ring-2 focus:ring-[#0085FF]/50 focus:border-[#0085FF] ${
-                      isDark
-                        ? 'bg-[#222222]/80 border border-white/[0.12] text-white placeholder:text-[#666666]'
-                        : 'bg-white border border-gray-300 text-gray-900 placeholder:text-gray-400 shadow-sm'
-                    }`}
-                  />
-                  <p
-                    className={`text-xs mt-2 leading-relaxed ${
-                      isDark ? 'text-[#707070]' : 'text-[#9ca3af]'
-                    }`}
-                  >
-                    Use an organization email to easily collaborate with teammates
-                  </p>
-                </div>
-
-                <button
-                  type="submit"
-                  className="w-full h-11 rounded-lg bg-[#0085FF] hover:bg-[#0073e6] active:bg-[#0062c4] text-white font-medium text-sm transition-all shadow-md shadow-blue-500/10 cursor-pointer flex items-center justify-center"
-                >
-                  Continue
-                </button>
-              </form>
-
-              {/* Divider */}
-              <div className="relative w-full my-7 flex items-center justify-center">
-                <div
-                  className={`border-t w-full ${
-                    isDark ? 'border-white/[0.08]' : 'border-gray-200'
-                  }`}
-                />
-                <span
-                  className={`px-3.5 text-xs absolute ${
-                    isDark ? 'bg-[#111111] text-[#6e6e6e]' : 'bg-[#f8f9fa] text-[#9ca3af]'
-                  }`}
-                >
-                  or continue with
-                </span>
-              </div>
-
-              {/* OAuth & Auth Buttons Grid */}
-              <div className="w-full space-y-2.5">
-                {/* Row 1: Google, Apple, Microsoft */}
-                <div className="grid grid-cols-3 gap-2.5">
-                  {/* Google */}
+              {/* Error banner if authentication failed */}
+              {authError && (
+                <div className="w-full mb-6 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-start gap-2.5 text-left animate-in fade-in duration-200">
+                  <AlertCircle className="size-4 shrink-0 mt-0.5" />
+                  <div className="flex-1 leading-relaxed">{authError}</div>
                   <button
                     type="button"
-                    onClick={() => setPage('dashboard')}
-                    className={`flex flex-col items-center justify-center gap-2 py-3 px-3 rounded-xl border active:scale-[0.98] transition-all cursor-pointer group shadow-sm ${
+                    onClick={() => setAuthError(null)}
+                    className="text-red-400/80 hover:text-red-400 text-xs font-semibold underline ml-1 cursor-pointer"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+
+              {/* Main Auth Action Area */}
+              {isAuthenticating ? (
+                /* Authenticating State */
+                <div className="w-full space-y-4 animate-in fade-in duration-200">
+                  <div
+                    className={`p-5 rounded-2xl border flex flex-col items-center text-center gap-3 ${
                       isDark
-                        ? 'bg-[#1c1c1c] border-white/[0.08] hover:bg-[#252525] hover:border-white/[0.16] text-[#d4d4d4] hover:text-white'
-                        : 'bg-white border-gray-200/80 hover:bg-gray-50 hover:border-gray-300 text-gray-700 hover:text-gray-900'
+                        ? 'bg-[#181818] border-white/[0.08]'
+                        : 'bg-white border-gray-200 shadow-sm'
                     }`}
                   >
-                    <svg className="size-5" viewBox="0 0 24 24">
+                    <div className="relative flex items-center justify-center">
+                      <div className="size-12 rounded-full bg-blue-500/10 flex items-center justify-center">
+                        <Loader2 className="size-6 text-[#0085FF] animate-spin" />
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <h3
+                        className={`text-sm font-semibold ${
+                          isDark ? 'text-white' : 'text-gray-900'
+                        }`}
+                      >
+                        Waiting for browser sign-in...
+                      </h3>
+                      <p className="text-xs text-[#888888] leading-relaxed">
+                        A browser tab has been opened. Complete sign-in on the website to continue to your workspace.
+                      </p>
+                    </div>
+
+                    <div className="w-full pt-2 flex flex-col gap-2">
+                      <button
+                        type="button"
+                        onClick={handleGoogleSignIn}
+                        className={`w-full h-10 px-3 rounded-xl border text-xs font-medium transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                          isDark
+                            ? 'bg-[#202020] border-white/[0.1] hover:bg-[#282828] text-white'
+                            : 'bg-gray-50 border-gray-200 hover:bg-gray-100 text-gray-800'
+                        }`}
+                      >
+                        <ExternalLink className="size-3.5" />
+                        <span>Open browser again</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleCancelAuth}
+                        className={`w-full h-9 px-3 rounded-xl text-xs font-medium transition-all flex items-center justify-center cursor-pointer ${
+                          isDark
+                            ? 'text-[#888888] hover:text-white hover:bg-white/[0.04]'
+                            : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'
+                        }`}
+                      >
+                        <span>Cancel</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* Standard Continue with Google Button */
+                <div className="w-full">
+                  <button
+                    type="button"
+                    onClick={handleGoogleSignIn}
+                    className={`w-full h-12 px-4 rounded-xl border font-medium text-sm transition-all flex items-center justify-center gap-3 cursor-pointer shadow-sm active:scale-[0.99] group ${
+                      isDark
+                        ? 'bg-[#1c1c1c] border-white/[0.12] hover:bg-[#252525] text-white'
+                        : 'bg-white border-gray-200 hover:bg-gray-50 text-gray-800'
+                    }`}
+                  >
+                    <svg className="size-5 shrink-0" viewBox="0 0 24 24">
                       <path
                         fill="#4285F4"
                         d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"
@@ -286,103 +559,10 @@ export function App() {
                         d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
                       />
                     </svg>
-                    <span className="text-xs font-medium">Google</span>
-                  </button>
-
-                  {/* Apple */}
-                  <button
-                    type="button"
-                    className={`flex flex-col items-center justify-center gap-2 py-3 px-3 rounded-xl border active:scale-[0.98] transition-all cursor-pointer group shadow-sm ${
-                      isDark
-                        ? 'bg-[#1c1c1c] border-white/[0.08] hover:bg-[#252525] hover:border-white/[0.16] text-[#d4d4d4] hover:text-white'
-                        : 'bg-white border-gray-200/80 hover:bg-gray-50 hover:border-gray-300 text-gray-700 hover:text-gray-900'
-                    }`}
-                  >
-                    <svg
-                      className={`size-5 fill-current ${isDark ? 'text-white' : 'text-black'}`}
-                      viewBox="0 0 170 170"
-                    >
-                      <path d="M150.37 130.25c-2.45 5.66-5.35 10.87-8.71 15.66-4.58 6.53-8.33 11.05-11.22 13.56-4.48 4.12-9.28 6.23-14.42 6.35-3.69 0-8.14-1.05-13.32-3.18-5.19-2.12-9.97-3.17-14.34-3.17-4.58 0-9.49 1.05-14.75 3.17-5.26 2.13-9.5 3.24-12.74 3.35-4.35.13-9.16-1.9-14.42-6.08-3.69-3.04-7.59-7.79-11.72-14.25-6.25-9.8-11.08-20.73-14.48-32.8-3.4-12.07-5.1-23.36-5.1-33.87 0-14.25 3.69-26.04 11.08-35.37 7.39-9.33 16.59-14.12 27.6-14.38 4.8 0 10.33 1.25 16.59 3.75 6.26 2.5 10.35 3.8 12.27 3.89 1.57 0 5.86-1.39 12.87-4.17 7.01-2.78 12.82-3.95 17.43-3.5 13.04.88 23.34 5.92 30.89 15.12-11.45 6.94-17.06 16.51-16.83 28.71.22 9.58 3.96 17.65 11.22 24.21 7.26 6.56 15.93 10.23 26.02 11.01-2.01 6.18-4.63 12.56-7.87 19.14zM119.22 33.15c0-7.17 2.62-13.88 7.87-20.12 5.25-6.24 11.75-10.25 19.5-12.03.35 1.5.53 2.92.53 4.25 0 7.17-2.7 13.88-8.1 20.12-5.4 6.25-11.99 10.13-19.79 11.64-.02-1.32-.01-2.6-.01-3.86z" />
-                    </svg>
-                    <span className="text-xs font-medium">Apple</span>
-                  </button>
-
-                  {/* Microsoft */}
-                  <button
-                    type="button"
-                    className={`flex flex-col items-center justify-center gap-2 py-3 px-3 rounded-xl border active:scale-[0.98] transition-all cursor-pointer group shadow-sm ${
-                      isDark
-                        ? 'bg-[#1c1c1c] border-white/[0.08] hover:bg-[#252525] hover:border-white/[0.16] text-[#d4d4d4] hover:text-white'
-                        : 'bg-white border-gray-200/80 hover:bg-gray-50 hover:border-gray-300 text-gray-700 hover:text-gray-900'
-                    }`}
-                  >
-                    <svg className="size-5" viewBox="0 0 23 23">
-                      <path fill="#f25022" d="M1 1h10v10H1z" />
-                      <path fill="#00a4ef" d="M1 12h10v10H1z" />
-                      <path fill="#7fba00" d="M12 1h10v10H12z" />
-                      <path fill="#ffb900" d="M12 12h10v10H12z" />
-                    </svg>
-                    <span className="text-xs font-medium">Microsoft</span>
+                    <span>Continue with Google</span>
                   </button>
                 </div>
-
-                {/* Row 2: Passkey & SSO */}
-                <div className="grid grid-cols-2 gap-2.5 max-w-[280px] mx-auto">
-                  {/* Passkey */}
-                  <button
-                    type="button"
-                    className={`flex flex-col items-center justify-center gap-2 py-3 px-3 rounded-xl border active:scale-[0.98] transition-all cursor-pointer group shadow-sm ${
-                      isDark
-                        ? 'bg-[#1c1c1c] border-white/[0.08] hover:bg-[#252525] hover:border-white/[0.16] text-[#d4d4d4] hover:text-white'
-                        : 'bg-white border-gray-200/80 hover:bg-gray-50 hover:border-gray-300 text-gray-700 hover:text-gray-900'
-                    }`}
-                  >
-                    <svg
-                      className={`size-5 stroke-current fill-none stroke-[1.75] ${
-                        isDark ? 'text-white' : 'text-gray-800'
-                      }`}
-                      viewBox="0 0 24 24"
-                    >
-                      <circle cx="9" cy="8" r="4" />
-                      <path
-                        d="M17 11v6m0-3h3m-3 3h2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                      <path
-                        d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                    <span className="text-xs font-medium">Passkey</span>
-                  </button>
-
-                  {/* SSO */}
-                  <button
-                    type="button"
-                    className={`flex flex-col items-center justify-center gap-2 py-3 px-3 rounded-xl border active:scale-[0.98] transition-all cursor-pointer group shadow-sm ${
-                      isDark
-                        ? 'bg-[#1c1c1c] border-white/[0.08] hover:bg-[#252525] hover:border-white/[0.16] text-[#d4d4d4] hover:text-white'
-                        : 'bg-white border-gray-200/80 hover:bg-gray-50 hover:border-gray-300 text-gray-700 hover:text-gray-900'
-                    }`}
-                  >
-                    <svg
-                      className={`size-5 stroke-current fill-none stroke-[1.75] ${
-                        isDark ? 'text-white' : 'text-gray-800'
-                      }`}
-                      viewBox="0 0 24 24"
-                    >
-                      <rect x="4" y="2" width="16" height="20" rx="2" strokeLinecap="round" />
-                      <path
-                        d="M9 22v-4h6v4M8 6h.01M16 6h.01M8 10h.01M16 10h.01M8 14h.01M16 14h.01"
-                        strokeLinecap="round"
-                      />
-                    </svg>
-                    <span className="text-xs font-medium">SSO</span>
-                  </button>
-                </div>
-              </div>
+              )}
 
               {/* Footer Disclaimer */}
               <p
@@ -390,24 +570,37 @@ export function App() {
                   isDark ? 'text-[#666666]' : 'text-gray-500'
                 }`}
               >
-                By continuing, you acknowledge that you understand and agree to the{' '}
+                By signing in, you agree to our{' '}
                 <a
                   href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (window.electronAPI?.openExternal) {
+                      window.electronAPI.openExternal('http://localhost:3000/privacy');
+                    }
+                  }}
                   className={`underline transition-colors ${
                     isDark ? 'text-[#888888] hover:text-white' : 'text-gray-700 hover:text-gray-900'
                   }`}
                 >
-                  Terms &amp; Conditions
+                  Terms of Service
                 </a>{' '}
                 and{' '}
                 <a
                   href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (window.electronAPI?.openExternal) {
+                      window.electronAPI.openExternal('http://localhost:3000/privacy');
+                    }
+                  }}
                   className={`underline transition-colors ${
                     isDark ? 'text-[#888888] hover:text-white' : 'text-gray-700 hover:text-gray-900'
                   }`}
                 >
                   Privacy Policy
                 </a>
+                .
               </p>
             </div>
           </main>
