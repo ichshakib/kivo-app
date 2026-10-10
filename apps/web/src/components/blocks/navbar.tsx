@@ -51,6 +51,10 @@ export const Navbar = () => {
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
   const pathname = usePathname();
 
+  if (pathname === '/home' || pathname?.startsWith('/home/')) {
+    return null;
+  }
+
   return (
     <section
       className={cn(
@@ -116,7 +120,11 @@ export const Navbar = () => {
           <ThemeToggle />
           {user ? (
             <div className="flex items-center gap-2 max-lg:hidden">
-              <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-muted/60 border border-border text-xs">
+              <Link
+                href="/home"
+                title="Go to Workspace"
+                className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-muted/60 border border-border text-xs hover:bg-muted transition-colors cursor-pointer"
+              >
                 {user.avatar ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
@@ -132,7 +140,7 @@ export const Navbar = () => {
                 <span className="font-medium text-foreground max-w-[120px] truncate">
                   {user.name || user.email}
                 </span>
-              </div>
+              </Link>
               <Button
                 variant="outline"
                 size="sm"
@@ -270,6 +278,15 @@ export const Navbar = () => {
                     <span className="text-xs text-muted-foreground">{user.email}</span>
                   </div>
                 </div>
+                <Link
+                  href="/home"
+                  onClick={() => setIsMenuOpen(false)}
+                  className="block w-full"
+                >
+                  <Button className="w-full bg-[#0085FF] hover:bg-[#0073e6] text-white text-xs">
+                    Go to Workspace
+                  </Button>
+                </Link>
                 <Button
                   variant="outline"
                   className="w-full text-xs"

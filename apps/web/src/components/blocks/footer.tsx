@@ -1,10 +1,18 @@
-import Link from 'next/link';
+'use client';
 
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import { ArrowUpRight } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 
 export function Footer() {
+  const pathname = usePathname();
+
+  if (pathname === '/home' || pathname?.startsWith('/home/')) {
+    return null;
+  }
+
   const navigation = [
     { name: 'Product', href: '/#feature-modern-teams' },
     { name: 'About Us', href: '/about' },
