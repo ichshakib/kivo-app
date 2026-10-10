@@ -17,6 +17,10 @@ export const startServer = () => {
         const dbStatus = await testDatabaseConnection();
         if (dbStatus.connected) {
           logger.info(`🗄️ PostgreSQL database connected successfully (${dbStatus.latencyMs}ms)`);
+          const { ensurePageTable } = await import('./services/page.service');
+          await ensurePageTable().catch((err) =>
+            logger.error(`[Database] Error initializing pages table: ${err.message}`)
+          );
         } else {
           logger.warn(`⚠️ PostgreSQL connection warning: ${dbStatus.error}`);
         }

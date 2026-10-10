@@ -29,6 +29,10 @@ export const ENV = {
     REGION: process.env.AWS_REGION || 'ap-southeast-1',
     BUCKET: process.env.AWS_BUCKET_NAME || process.env.S3_BUCKET || 'kivo',
   },
+  MEDIA: {
+    UNSPLASH_ACCESS_KEY: process.env.UNSPLASH_ACCESS_KEY || '',
+    GIPHY_API_KEY: process.env.GIPHY_API_KEY || '',
+  },
 };
 
 export const {
